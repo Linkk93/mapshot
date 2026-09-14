@@ -1,0 +1,59 @@
+# Fork-only build workflow.
+#
+# Why this exists: on freshly forked repositories GitHub does not run
+# inherited workflows (the release-published trigger in go.yml stays inert
+# until the owner activates Actions on the fork's Actions tab). This
+# workflow_dispatch copy lets the fork owner build and attach release
+# assets manually. It is functionally identical to go.yml otherwise.
+#
+# It is safe to delete once Actions are activated on the fork (go.yml then
+# fires on release: published as it does upstream).
+name: Build fork release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to upload assets to (must already exist)'
+        required: true
+        default: '0.0.28-2.1'
+  release:
+    types: [published]
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    steps:
+    - name: Set up Go 1.x
+      uses: actions/setup-go@v3
+      with:
+        go-version: '^1.18.7'
+      id: go
+
+    - name: Install NPM
+      uses: actions/setup-node@v1
+      with:
+        node-version: '16'
+
+    - name: Check out code
+      uses: actions/checkout@v3
+
+    - name: Setup NPM modules
+      run: npm --prefix frontend install
+
+    - name: Get Go dependencies
+      run: go get -v -t -d ./...
+
+    - name: Generate files
+      run: ./generate.sh
+
+    - name: Build
+      run: ./build.sh
+
+    - name: Upload to release
+      uses: AButler/upload-release-assets@v2.0
+      with:
+        files: 'build/*'
+        repo-token: ${{ secrets.GITHUB_TOKEN }}
+        release-tag: ${{ github.event_name == 'release' && github.event.release.tag_name || github.event.inputs.tag }}
