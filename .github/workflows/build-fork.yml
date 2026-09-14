@@ -24,6 +24,10 @@ jobs:
   release:
     name: Release
     runs-on: ubuntu-latest
+    permissions:
+      # Fork default is a read-only GITHUB_TOKEN; the upload step needs
+      # write access to attach assets to the release.
+      contents: write
     steps:
     - name: Set up Go 1.x
       uses: actions/setup-go@v3
