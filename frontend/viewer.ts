@@ -155,12 +155,18 @@ function run(config: common.MapshotConfig, info: common.MapshotJSON) {
 
     const surfaces: Surface[] = [];
     const surfaceByKey: Map<string, Surface> = new Map();
+    // Layer-object → surface map for baselayerchange: resolving by the
+    // control's e.name fails for localised surface names (the label is the
+    // localised string, which differs from surface_name), leaving the s URL
+    // parameter unwritten on surface switches.
+    const surfaceByLayer: Map<L.Layer, Surface> = new Map();
     for (const si of info.surfaces) {
         const s = new Surface(config, si);
         surfaces.push(s);
         layerControl.addBaseLayer(s.baseLayer, si.surface_localised_name ?? si.surface_name);
         surfaceByKey.set(s.surfaceInfo.surface_idx.toString(), s);
         surfaceByKey.set(s.surfaceInfo.surface_name, s);
+        surfaceByLayer.set(s.baseLayer, s);
     }
 
     const trainLayer = L.layerGroup();
@@ -220,7 +226,7 @@ function run(config: common.MapshotConfig, info: common.MapshotJSON) {
 
     // Update URL & current surface when base layer changed
     mymap.on('baselayerchange', (e: L.LayersControlEvent) => {
-        const s = surfaceByKey.get(e.name);
+        const s = surfaceByLayer.get(e.layer);
         if (!s) {
             console.log("unknown layer", e.name);
             return;
