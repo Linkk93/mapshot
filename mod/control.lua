@@ -277,24 +277,24 @@ function gen_surface_info(params, surface)
     end
   end
 
-  local localised_name = surface.localised_name
+  -- NOTE: no surface_localised_name in the output: for SE surfaces it is a
+  -- LocalisedString (e.g. {"space-exploration.simple-a-b-space",
+  -- "[img=virtual-signal/se-planet]", "Aine"}) which the browser viewer can
+  -- only display as the raw key. The viewer falls back to surface_name.
 
   local is_planet = false
   if surface.planet ~= nil then
     is_planet = true
-    localised_name = surface.planet.name
   end
 
   local is_space_platform = false
   if surface.platform ~= nil then
     is_space_platform = true
-    localised_name = surface.platform.name
   end
 
   return {
     surface_name = surface.name,
     surface_idx = surface.index,
-    surface_localised_name = localised_name,
     is_planet = is_planet,
     is_space_platform = is_space_platform,
     file_prefix = "s" .. surface.index .. "zoom_",
