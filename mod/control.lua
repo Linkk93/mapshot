@@ -133,14 +133,19 @@ function mapshot(params)
     local r = helpers.write_file(prefix .. fname, content)
   end
 
-  -- Generate all the tiles.
+  -- Generate all the tiles. Count the actually queued screenshots (tiles
+  -- with quality 0 are skipped) so the CLI can detect completion by
+  -- counting files on disk - see the note in the onstartup handler below.
+  local total_queued = 0
   for _, surface_info in ipairs(surface_infos) do
     for render_zoom = surface_info.zoom_min, surface_info.zoom_max do
       local tile_size = surface_info.tile_size / math.pow(2, render_zoom)
       local layer_prefix = data_prefix .. surface_info.file_prefix .. render_zoom .. "/"
-      gen_layer(params, tile_size, surface_info.render_size, surface_info.world_min, surface_info.world_max, layer_prefix, game.surfaces[surface_info.surface_idx])
+      total_queued = total_queued + gen_layer(params, tile_size, surface_info.render_size, surface_info.world_min, surface_info.world_max, layer_prefix, game.surfaces[surface_info.surface_idx])
     end
   end
+  helpers.write_file(data_prefix .. "ntiles.txt", tostring(total_queued))
+  log("Mapshot: queued " .. total_queued .. " screenshot(s); tile plan written")
 
   game.print("Mapshot: all screenshots started, might take a while to render; location: " .. data_prefix)
   log("Mapshot: all screenshots started, might take a while to render; location: " .. data_prefix)
@@ -313,6 +318,7 @@ function gen_layer(params, tile_size, render_size, world_min, world_max, data_pr
   game.print(msg)
   log(msg)
 
+  local queued = 0
   local player_force_mode = params.area == "player"
 
   for tile_y = tile_min.y, tile_max.y do
@@ -342,9 +348,12 @@ function gen_layer(params, tile_size, render_size, world_min, world_max, data_pr
           daytime = 0,
           water_tick = 0,
         }
+        queued = queued + 1
       end
     end
   end
+
+  return queued
 end
 
 -- Create a unique ID of the generated mapshot.
@@ -402,23 +411,20 @@ script.on_event(defines.events.on_tick, function(evt)
     log("onstartup requested id=" .. params.onstartup)
     local data_prefix = mapshot(params)
 
-    -- Ensure that screen shots are written before marking as done.
-    game.set_wait_for_screenshots_to_finish()
-
-    -- When set_wait_for_screenshots_to_finish was not used, the `done` file was
-    -- be written before the screenshots, leading to killing Factorio too early.
-    -- On Linux, using signal Interrupt helped a lot, but that did not guarantee
-    -- it - and it is not available on Windows. Writing the `done` marker on the
-    -- next tick seemed enough to guarantee ordering. Now
-    -- set_wait_for_screenshots_to_finish is used, this is likely unnecessary -
-    -- but before removing it, more testing is needed.
-    script.on_event(defines.events.on_tick, function(evt)
-      restore_surface_show_clouds()
-
-      log("marking as done @" .. evt.tick)
-      script.on_event(defines.events.on_tick, nil)
-      helpers.write_file("mapshot-done-" .. params.onstartup, data_prefix)
-    end)
+    -- Factorio 2.1: set_wait_for_screenshots_to_finish() never returns - the
+    -- engine keeps rendering frames forever after the screenshot queue has
+    -- drained - so the tick never completes and the done marker written on
+    -- the next tick could never be written. Instead of blocking on it:
+    --  - mapshot() exports the number of queued screenshots to ntiles.txt,
+    --    letting the CLI detect completion by counting tile files on disk;
+    --  - the simulation is paused here, which freezes the world state (the
+    --    same benefit set_wait gave: consistent tiles, no autosaves, no
+    --    scripted events evolving the factory) while the renderer keeps
+    --    pumping frames and flushing screenshots.
+    -- No done marker is written on this path; the CLI terminates Factorio
+    -- once the expected number of tile files is on disk.
+    game.tick_paused = true
+    log("mapshot: simulation paused; screenshots flushing in background")
   end
 end)
 

@@ -8,6 +8,8 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Palats/mapshot/embed"
@@ -84,6 +86,56 @@ func copyMod(dstMapshot string) error {
 		}
 	}
 	return nil
+}
+
+// findTilePlan looks for the ntiles.txt plan file written by the mod after
+// all screenshots have been queued. It returns the data prefix (relative to
+// the script-output directory, slash separated with a trailing slash - the
+// same format as the done file content) and the number of tile jpgs expected
+// on disk once rendering is complete.
+func findTilePlan(scriptOutput string) (string, int, error) {
+	var planFile string
+	err := filepath.Walk(scriptOutput, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() && info.Name() == "ntiles.txt" {
+			planFile = path
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	if err != nil || planFile == "" {
+		return "", 0, fmt.Errorf("no tile plan found under %s", scriptOutput)
+	}
+	raw, err := ioutil.ReadFile(planFile)
+	if err != nil {
+		return "", 0, err
+	}
+	wanted, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil || wanted < 0 {
+		return "", 0, fmt.Errorf("invalid tile plan %q: %v", string(raw), err)
+	}
+	rel, err := filepath.Rel(scriptOutput, filepath.Dir(planFile))
+	if err != nil {
+		return "", 0, err
+	}
+	return filepath.ToSlash(rel) + "/", wanted, nil
+}
+
+// countTileJpgs counts the tile jpg files already written under dir.
+func countTileJpgs(dir string) (int, error) {
+	n := 0
+	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() && strings.EqualFold(filepath.Ext(path), ".jpg") {
+			n++
+		}
+		return nil
+	})
+	return n, err
 }
 
 func writeOverrides(data map[string]interface{}, dstPath string) error {
@@ -173,16 +225,39 @@ func render(ctx context.Context, factorioSettings *factorio.Settings, rf *Render
 		errCh <- fact.Run(execCtx, factorioArgs)
 	}()
 
-	// Wait for the `done` file to be created, indicating that the work is
-	// done.
+	// Wait for completion. Two signals, whichever comes first:
+	//  - the legacy `done` file, written by the mod on Factorio <= 2.0 after
+	//    set_wait_for_screenshots_to_finish() returned;
+	//  - the tile plan file (ntiles.txt) plus counting the tile jpg files on
+	//    disk, for Factorio 2.1 where the mod pauses the simulation instead
+	//    of blocking on set_wait_for_screenshots_to_finish (which never
+	//    returns there) and therefore never writes the done file.
+	var resultPrefix string
+	var tilesWanted int
 	for {
-		_, err := os.Stat(doneFile)
-		if err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("unable to stat file %q: %w", doneFile, err)
-		}
-		if err == nil {
+		if _, err := os.Stat(doneFile); err != nil {
+			if !os.IsNotExist(err) {
+				return fmt.Errorf("unable to stat file %q: %w", doneFile, err)
+			}
+		} else {
 			cancel()
 			break
+		}
+
+		if resultPrefix == "" {
+			if prefix, wanted, err := findTilePlan(fact.ScriptOutput()); err == nil {
+				resultPrefix = prefix
+				tilesWanted = wanted
+				glog.Infof("tile plan found: %d tile(s) expected under %q", tilesWanted, resultPrefix)
+			}
+		}
+		if resultPrefix != "" {
+			n, err := countTileJpgs(filepath.Join(fact.ScriptOutput(), resultPrefix))
+			if err == nil && n >= tilesWanted {
+				glog.Infof("all %d tile(s) written (file-count completion)", n)
+				cancel()
+				break
+			}
 		}
 
 		// Context cancellation should terminate Factorio, which is detected
@@ -196,18 +271,22 @@ func render(ctx context.Context, factorioSettings *factorio.Settings, rf *Render
 			return fmt.Errorf("factorio exited early: %w", err)
 		}
 	}
-	glog.Infof("done file %q now exists", doneFile)
-	rawDone, err := ioutil.ReadFile(doneFile)
-	if err != nil {
-		return fmt.Errorf("unable to read file %q: %w", doneFile, err)
+
+	if resultPrefix == "" {
+		// Legacy path: read the output prefix from the done file.
+		glog.Infof("done file %q now exists", doneFile)
+		rawDone, err := ioutil.ReadFile(doneFile)
+		if err != nil {
+			return fmt.Errorf("unable to read file %q: %w", doneFile, err)
+		}
+		resultPrefix = string(rawDone)
+
+		// Cleaning up done file now that we've read it.
+		err = os.Remove(doneFile)
+		glog.Infof("removed done-file %q: %v", doneFile, err)
 	}
-	resultPrefix := string(rawDone)
 	glog.Infof("output at %s", resultPrefix)
 	fmt.Println("Output:", filepath.Join(fact.ScriptOutput(), resultPrefix))
-
-	// Cleaning up done file now that we've read it.
-	err = os.Remove(doneFile)
-	glog.Infof("removed done-file %q: %v", doneFile, err)
 
 	// Wait for Factorio to terminate.
 	err = <-errCh
